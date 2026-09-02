@@ -1,0 +1,1389 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ctximg — contextual photo search</title>
+<style>
+/* ---------------------------------------------------------------------------
+   Swiss structure, glass only where things genuinely overlap.
+
+   The grid is one 8px unit and a single left alignment line that the header,
+   the search field and the photo grid all share. Type is one grotesque, set
+   flush left and ragged right, with hierarchy carried by size and weight
+   rather than by ornament.
+
+   Glass is reserved for surfaces that actually sit above other content - the
+   header, the drawers, the lightbox chrome. Everything else is flat, because
+   a blurred panel over a flat background is decoration pretending to be depth.
+
+   The palette stays achromatic. A neutral surround is what photo review needs:
+   any tint in the chrome shifts how you read the colour of the photograph
+   beside it, so the photographs are the only colour on screen. Fonts are
+   system-only - this app is local, and a webfont would send a request off the
+   machine on every load.
+--------------------------------------------------------------------------- */
+:root {
+  --bg:        #0f0f10;
+  --raised:    #1a1a1c;
+  --line:      rgba(255, 255, 255, .10);
+  --line-firm: rgba(255, 255, 255, .18);
+  --text:      #f2f2f0;
+  --dim:       #9a9a9e;
+  --faint:     #64646a;
+
+  --glass:     rgba(22, 22, 24, .68);
+  --glass-up:  rgba(30, 30, 33, .78);
+  --blur:      saturate(120%) blur(20px);
+
+  --sans: "Helvetica Neue", Helvetica, Arial, "Segoe UI", system-ui, sans-serif;
+
+  /* One 8px module. Every measurement below is a multiple of it. */
+  --u1: 8px;  --u2: 16px; --u3: 24px; --u4: 32px;
+  --u6: 48px; --u8: 64px; --u12: 96px;
+
+  --gutter: clamp(var(--u3), 4.5vw, var(--u8));
+  --tile-gap: 8px;
+  --bar: 56px;
+}
+
+* { box-sizing: border-box; }
+
+html { height: 100%; }
+
+body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Something for the glass to actually refract. Pure luminance, no hue, and
+   only in the upper field - never behind the photo grid. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: 70vh;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(60% 70% at 12% 0%, rgba(255,255,255,.055), transparent 70%),
+    radial-gradient(45% 55% at 88% 8%, rgba(255,255,255,.035), transparent 72%);
+}
+
+:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 3px;
+}
+
+button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+
+/* --- header ------------------------------------------------------------- */
+
+.bar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: var(--u3);
+  height: var(--bar);
+  padding: 0 var(--gutter);
+  background: var(--glass);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border-bottom: 1px solid var(--line);
+}
+
+.mark {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .01em;
+  margin-right: auto;
+}
+
+.bar .tally { font-size: 12px; color: var(--dim); }
+.bar .tally b { color: var(--text); font-weight: 700; }
+
+.bar nav { display: flex; gap: var(--u1); }
+
+.bar nav button {
+  padding: 6px var(--u2);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--dim);
+  border: 1px solid transparent;
+}
+.bar nav button:hover { color: var(--text); border-color: var(--line); }
+.bar nav button[aria-expanded="true"] {
+  color: var(--text);
+  border-color: var(--line-firm);
+  background: rgba(255, 255, 255, .06);
+}
+
+/* --- search ------------------------------------------------------------- */
+
+/* Flush left against the page's single alignment line. Never centred: a
+   centred field would break the vertical edge the grid below establishes. */
+.stage {
+  position: relative;
+  z-index: 1;
+  padding: var(--u8) var(--gutter) var(--u4);
+  transition: padding .45s cubic-bezier(.2, .7, .2, 1);
+}
+.stage.docked { padding-top: var(--u4); padding-bottom: var(--u3); }
+
+.field {
+  position: relative;
+  border-bottom: 1px solid var(--line-firm);
+  transition: border-color .2s;
+}
+.field:focus-within { border-color: var(--text); }
+
+/* A sweeping hairline rather than a spinner: the rule under the field is
+   already part of the layout, so the wait is shown where the eye already is. */
+.field::after {
+  content: "";
+  position: absolute;
+  bottom: -1px;
+  height: 1px;
+  background: var(--text);
+  opacity: 0;
+  left: 0; right: 100%;
+}
+.stage.working .field::after { opacity: 1; animation: sweep 1.15s ease-in-out infinite; }
+
+@keyframes sweep {
+  0%   { left: 0;    right: 100%; }
+  48%  { left: 0;    right: 0; }
+  52%  { left: 0;    right: 0; }
+  100% { left: 100%; right: 0; }
+}
+
+.working {
+  margin-top: var(--u1);
+  font-size: 12px;
+  color: var(--dim);
+}
+.working[hidden] { display: none; }
+
+#q {
+  display: block;
+  width: 100%;
+  padding: 0 0 var(--u2);
+  border: 0;
+  outline: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: clamp(30px, 4.6vw, 58px);
+  font-weight: 400;
+  line-height: 1.06;
+  letter-spacing: -.025em;
+  transition: font-size .45s cubic-bezier(.2, .7, .2, 1);
+}
+.stage.docked #q { font-size: clamp(20px, 2.1vw, 26px); letter-spacing: -.015em; }
+#q::placeholder { color: var(--faint); }
+
+.scope {
+  display: flex;
+  align-items: baseline;
+  gap: var(--u3);
+  margin-top: var(--u2);
+  font-size: 12px;
+  color: var(--dim);
+}
+.scope b { color: var(--text); font-weight: 700; }
+.scope button {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--dim);
+  border-bottom: 1px solid var(--line-firm);
+  padding-bottom: 1px;
+}
+.scope button:hover { color: var(--text); border-color: var(--text); }
+
+/* A two-column measure: the explanation reads at a comfortable width while
+   the examples sit beside it rather than stacking into a long ladder. */
+.hint {
+  display: grid;
+  grid-template-columns: minmax(0, 34ch) minmax(0, 1fr);
+  gap: var(--u3) var(--u6);
+  margin-top: var(--u6);
+  max-width: 1000px;
+}
+.stage.docked .hint { display: none; }
+.hint p { margin: 0; color: var(--dim); font-size: 13px; line-height: 1.65; }
+
+.examples { display: flex; flex-wrap: wrap; gap: var(--u1); align-content: start; }
+.examples button {
+  padding: 7px 14px;
+  font-size: 12px;
+  color: var(--dim);
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, .02);
+}
+.examples button:hover { color: var(--text); border-color: var(--line-firm); }
+
+/* --- results ------------------------------------------------------------ */
+
+.results { position: relative; z-index: 1; padding: 0 var(--gutter) var(--u12); }
+.row { display: flex; gap: var(--tile-gap); margin-bottom: var(--tile-gap); }
+
+.tile {
+  position: relative;
+  flex: none;
+  margin: 0;
+  overflow: hidden;
+  background: var(--raised);
+  cursor: zoom-in;
+}
+.tile img { display: block; width: 100%; height: 100%; object-fit: cover; }
+
+/* Match strength as a rule along the foot of the frame: a light-meter reading
+   rather than a number shouting from every tile. */
+.meter {
+  position: absolute;
+  left: 0; bottom: 0;
+  height: 2px;
+  background: var(--text);
+}
+
+.tile figcaption {
+  position: absolute;
+  inset: auto 0 0 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--u2);
+  padding: var(--u4) 10px 9px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, .82));
+  font-size: 11px;
+  opacity: 0;
+  transition: opacity .15s;
+}
+.tile:hover figcaption, .tile:focus-visible figcaption { opacity: 1; }
+.tile .nm { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.tile .fd { display: block; color: var(--dim); }
+.tile figcaption b { font-weight: 700; }
+
+.note {
+  max-width: 52ch;
+  padding: var(--u8) 0;
+  color: var(--dim);
+  font-size: 14px;
+  line-height: 1.7;
+}
+.note strong { color: var(--text); font-weight: 500; }
+
+/* --- drawers ------------------------------------------------------------ */
+
+/* Panels slide over the grid instead of pushing it down: the photographs
+   should not jump because you opened a settings list. */
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  background: rgba(0, 0, 0, .45);
+  opacity: 0;
+  transition: opacity .25s;
+}
+.scrim[hidden] { display: none; }
+.scrim.on { opacity: 1; }
+
+.drawer {
+  position: fixed;
+  top: 0; right: 0; bottom: 0;
+  z-index: 50;
+  width: min(460px, 100vw);
+  display: flex;
+  flex-direction: column;
+  padding: var(--u4) var(--u4) var(--u3);
+  background: var(--glass-up);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border-left: 1px solid var(--line-firm);
+  transform: translateX(100%);
+  transition: transform .3s cubic-bezier(.2, .7, .2, 1);
+  overflow-y: auto;
+}
+.drawer[hidden] { display: none; }
+.drawer.on { transform: translateX(0); }
+
+.drawer header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--u2);
+  margin-bottom: var(--u1);
+}
+.drawer h2 { margin: 0; font-size: 22px; font-weight: 500; letter-spacing: -.02em; }
+.drawer .shut { font-size: 12px; color: var(--dim); padding: 4px; }
+.drawer .shut:hover { color: var(--text); }
+.drawer > p {
+  margin: 0 0 var(--u3);
+  color: var(--dim);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .bar { background: #17171a; }
+  .drawer { background: #1c1c1f; }
+  .lightbox footer { background: #17171a; }
+}
+
+/* --- folder list -------------------------------------------------------- */
+
+.folders { margin: 0 0 var(--u3); padding: 0; list-style: none; }
+.folders li {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2px var(--u2);
+  padding: var(--u2) 0;
+  border-top: 1px solid var(--line);
+}
+.folders li.off .name, .folders li.off .count { color: var(--faint); }
+
+/* A square, achromatic box: the browser default is a coloured control that
+   would be the only hue on the page. */
+.box {
+  appearance: none;
+  width: 16px; height: 16px;
+  margin: 0;
+  border: 1px solid var(--line-firm);
+  background: transparent;
+  cursor: pointer;
+  position: relative;
+}
+.box:checked { background: var(--text); border-color: var(--text); }
+.box:checked::after {
+  content: "";
+  position: absolute;
+  left: 4px; top: 1px;
+  width: 5px; height: 9px;
+  border: solid var(--bg);
+  border-width: 0 2px 2px 0;
+  transform: rotate(43deg);
+}
+.box:disabled { opacity: .35; cursor: default; }
+
+.folders .name {
+  grid-column: 2;
+  font-size: 13.5px;
+  font-weight: 500;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+.folders .count { grid-column: 3; font-size: 12px; color: var(--dim); }
+.folders .path {
+  grid-column: 2 / -1;
+  font-size: 11px;
+  color: var(--faint);
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+.folders .foot {
+  grid-column: 2 / -1;
+  display: flex;
+  align-items: center;
+  gap: var(--u2);
+  margin-top: 6px;
+}
+.folders .state { font-size: 11px; color: var(--faint); margin-right: auto; }
+.folders .state.warn { color: var(--text); border-bottom: 1px dotted var(--dim); cursor: help; }
+.folders .foot button { font-size: 11px; font-weight: 500; color: var(--dim); }
+.folders .foot button:hover { color: var(--text); }
+
+.add { display: grid; grid-template-columns: 1fr auto; gap: var(--u1); }
+.add input {
+  grid-column: 1 / -1;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, .3);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+}
+.add input:focus { outline: 0; border-color: var(--line-firm); }
+
+.btn {
+  padding: 9px var(--u2);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  border: 1px solid var(--line-firm);
+  background: rgba(255, 255, 255, .04);
+}
+.btn:hover { background: rgba(255, 255, 255, .1); }
+.btn[disabled] { opacity: .4; cursor: default; }
+.btn.quiet { color: var(--dim); border-color: var(--line); background: none; }
+.btn.quiet:hover { color: var(--text); border-color: var(--line-firm); }
+
+.job { margin-top: var(--u2); font-size: 12px; color: var(--dim); min-height: 1.4em; }
+.job .track { display: block; height: 2px; margin-top: var(--u1); background: rgba(255,255,255,.12); }
+.job .track i { display: block; height: 2px; background: var(--text); transition: width .2s; }
+.job .track.pending { background: rgba(255,255,255,.10); overflow: hidden; }
+.job .track.pending i { width: 35%; animation: creep 1.4s ease-in-out infinite; }
+@keyframes creep { 0% { margin-left: -35%; } 100% { margin-left: 100%; } }
+.job .row2 { display: flex; align-items: baseline; gap: var(--u2); margin-top: 6px; }
+.job .row2 button { font-size: 11.5px; font-weight: 500; color: var(--dim);
+                    border: 1px solid var(--line); padding: 4px 10px; }
+.job .row2 button:hover { color: var(--text); border-color: var(--line-firm); }
+
+/* --- terminal drawer ---------------------------------------------------- */
+
+.cli { font-size: 12.5px; line-height: 1.6; color: var(--dim); }
+.cli dl { margin: 0; }
+.cli dt { margin: 0 0 3px; }
+.cli dd { margin: 0 0 var(--u2); }
+.cli code {
+  display: inline-block;
+  padding: 3px 7px;
+  background: rgba(0, 0, 0, .42);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-family: "Cascadia Mono", Consolas, ui-monospace, monospace;
+  font-size: 11.5px;
+}
+.cli .after { margin-top: var(--u3); padding-top: var(--u3); border-top: 1px solid var(--line); }
+
+
+/* --- settings drawer ----------------------------------------------------- */
+
+.tiers { display: grid; gap: var(--u1); margin: 0 0 var(--u3); }
+
+.tier {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  gap: 4px var(--u2);
+  padding: var(--u2);
+  border: 1px solid var(--line);
+  cursor: pointer;
+  text-align: left;
+}
+.tier:hover { border-color: var(--line-firm); }
+.tier.on { border-color: var(--text); background: rgba(255, 255, 255, .05); }
+.tier .dot {
+  width: 14px; height: 14px; margin-top: 3px;
+  border: 1px solid var(--line-firm); border-radius: 50%;
+}
+.tier.on .dot { border-color: var(--text); background: var(--text); box-shadow: inset 0 0 0 3px var(--glass-up); }
+.tier .name { font-size: 13.5px; font-weight: 500; color: var(--text); }
+.tier .speed { font-size: 12px; color: var(--dim); white-space: nowrap; }
+.tier .why { grid-column: 2 / -1; font-size: 11.5px; color: var(--faint); line-height: 1.5; }
+.tier .id  { grid-column: 2 / -1; font-size: 11px; color: var(--faint);
+             font-family: "Cascadia Mono", Consolas, monospace; overflow-wrap: anywhere; }
+
+/* --- key/value readout --------------------------------------------------- */
+
+.facts { margin: 0 0 var(--u3); }
+.facts .pair {
+  display: flex; justify-content: space-between; gap: var(--u2);
+  padding: 7px 0; border-top: 1px solid var(--line); font-size: 12px;
+}
+.facts .pair span:first-child { color: var(--dim); }
+.facts .pair span:last-child { color: var(--text); text-align: right; overflow-wrap: anywhere; }
+.facts h3 {
+  margin: var(--u3) 0 0; font-size: 11.5px; font-weight: 500;
+  color: var(--faint); letter-spacing: .04em;
+}
+
+/* --- live meters --------------------------------------------------------- */
+
+.meters { display: grid; gap: var(--u2); margin-bottom: var(--u1); }
+.gauge .top {
+  display: flex; justify-content: space-between; gap: var(--u2);
+  font-size: 12px; margin-bottom: 5px;
+}
+.gauge .top b { font-weight: 700; }
+.gauge .bar { height: 3px; background: rgba(255, 255, 255, .1); }
+.gauge .bar i { display: block; height: 3px; background: var(--text); transition: width .35s linear; }
+.gauge.idle .bar i { background: var(--faint); }
+.gauge .sub { margin-top: 4px; font-size: 11px; color: var(--faint); }
+
+/* The header pulse: is it working, or sitting there? */
+.pulse {
+  display: inline-flex; align-items: baseline; gap: 6px;
+  font-size: 12px; color: var(--dim);
+}
+.pulse i {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--faint); transform: translateY(-1px);
+}
+.pulse.busy i { background: var(--text); animation: throb 1.1s ease-in-out infinite; }
+@keyframes throb { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+
+/* --- lightbox ----------------------------------------------------------- */
+
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  background: rgba(8, 8, 9, .92);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.lightbox[hidden] { display: none; }
+.lightbox .frame {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  padding: var(--u4);
+}
+.lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.lightbox footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--u1) var(--u4);
+  padding: var(--u2) var(--gutter);
+  background: var(--glass);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--dim);
+}
+.lightbox .path { flex: 1 1 320px; min-width: 0; color: var(--text); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.lightbox .facts b { color: var(--text); font-weight: 700; }
+
+@media (max-width: 640px) {
+  .hint { grid-template-columns: 1fr; }
+  .bar .tally { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+</style>
+</head>
+<body>
+
+<header class="bar">
+  <span class="mark">ctximg</span>
+  <span class="tally" id="count"></span>
+  <span class="pulse" id="pulse" title="GPU or CPU activity"><i></i><span>idle</span></span>
+  <nav>
+    <button id="toggle-folders" aria-expanded="false">Folders</button>
+    <button id="toggle-settings" aria-expanded="false">Settings</button>
+    <button id="toggle-cli" aria-expanded="false">Terminal</button>
+  </nav>
+</header>
+
+<div class="scrim" id="scrim" hidden></div>
+
+<aside class="drawer" id="folders-panel" hidden aria-label="Folders">
+  <header>
+    <h2>Folders</h2>
+    <button class="shut" data-close>Close</button>
+  </header>
+  <p>Tick the folders to search. Removing one here deletes its index only —
+     never your photos.</p>
+  <ul class="folders" id="folder-list"></ul>
+  <div class="add">
+    <input id="folder-input" placeholder="C:\Users\you\Pictures" spellcheck="false" aria-label="Folder path">
+    <button class="btn quiet" id="browse">Browse</button>
+    <button class="btn" id="add-folder">Add and index</button>
+  </div>
+  <div class="job" id="estimate"></div>
+  <div class="job" id="job-status"></div>
+</aside>
+
+<aside class="drawer" id="settings-panel" hidden aria-label="Settings">
+  <header>
+    <h2>Settings</h2>
+    <button class="shut" data-close>Close</button>
+  </header>
+  <p>Accuracy and indexing time trade against each other. Changing the model
+     means every folder has to be indexed again, so the choice is worth making
+     deliberately.</p>
+
+  <div class="tiers" id="tier-list"></div>
+  <div class="job" id="tier-note"></div>
+
+  <div class="facts" id="running-facts"></div>
+  <div class="meters" id="meters"></div>
+  <div class="job" id="app-note">
+    The app keeps running after you close the tab, so reopening is instant.
+  </div>
+  <button class="btn quiet" id="quit-app" style="margin-top:var(--u2)">Quit ctximg</button>
+</aside>
+
+<aside class="drawer" id="cli-panel" hidden aria-label="Terminal">
+  <header>
+    <h2>Terminal</h2>
+    <button class="shut" data-close>Close</button>
+  </header>
+  <p>The terminal works on the folder you are standing in. Searching across
+     folders lives here in the app, where you can see the photos.</p>
+  <div class="cli">
+    <dl>
+      <dt><code>ctximg</code></dt>
+      <dd>Search the current folder. Offers to index it the first time.</dd>
+      <dt><code>ctximg index</code></dt>
+      <dd>Index or catch up this folder. <code>--rebuild</code> re-embeds everything.</dd>
+      <dt><code>ctximg forget</code></dt>
+      <dd>Delete this folder's index. Photos are untouched.</dd>
+      <dt><code>ctximg web</code></dt>
+      <dd>Open this folder here in the app.</dd>
+      <dt><code>ctximg list</code></dt>
+      <dd>Every folder indexed so far.</dd>
+      <dt><code>ctximg doctor</code></dt>
+      <dd>Python, torch, GPU, model and folders.</dd>
+    </dl>
+    <p class="after">At the <code>ctximg</code> prompt: <code>:open 3</code> opens a
+       result, <code>:web</code> brings the folder here, <code>:reindex</code>
+       catches up, <code>:q</code> quits.</p>
+  </div>
+</aside>
+
+<main>
+  <section class="stage" id="stage">
+    <div class="field">
+      <input id="q" autocomplete="off" spellcheck="false" placeholder="Describe a photo" aria-label="Describe a photo">
+    </div>
+    <div class="scope" id="scope"></div>
+    <div class="working" id="working" hidden></div>
+    <div class="hint">
+      <p>Search by what a photo shows, not by what it is called. Nothing here
+         matches filenames or keywords, so describe the scene the way you would
+         to a person.</p>
+      <div class="examples" id="examples"></div>
+    </div>
+  </section>
+
+  <div class="results" id="results"></div>
+</main>
+
+<div class="lightbox" id="lightbox" hidden>
+  <div class="frame"><img id="lb-img" alt=""></div>
+  <footer>
+    <span class="path" id="lb-path"></span>
+    <span class="facts" id="lb-meta"></span>
+    <button class="btn quiet" id="lb-similar">Find similar photos</button>
+    <button class="btn quiet" id="lb-close">Close</button>
+  </footer>
+</div>
+
+<script>
+const EXAMPLES = [
+  "someone laughing at a dinner table",
+  "a narrow street in the rain",
+  "morning light through a window",
+  "hands holding a coffee cup",
+  "a dog mid-jump on grass",
+];
+
+const el = (id) => document.getElementById(id);
+const stage = el("stage"), input = el("q"), results = el("results");
+let hits = [], current = -1, folders = [], jobTimer = null;
+let modelLoaded = false;
+
+// --- search ---------------------------------------------------------------
+
+let timer = null;
+input.addEventListener("input", () => {
+  clearTimeout(timer);
+  const value = input.value.trim();
+  if (!value) {
+    hits = []; stage.classList.remove("docked");
+    results.innerHTML = ""; setWorking(false); return;
+  }
+  timer = setTimeout(() => search(value), 300);
+});
+input.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { clearTimeout(timer); if (input.value.trim()) search(input.value.trim()); }
+});
+
+function search(value) { run(`/api/search?q=${encodeURIComponent(value)}&k=80`); }
+
+function setWorking(on, message) {
+  stage.classList.toggle("working", on);
+  const line = el("working");
+  line.textContent = message || "";
+  line.hidden = !on;
+}
+
+async function run(url) {
+  // The first search pays for loading the model, which is many seconds of
+  // apparent nothing. Name the wait rather than leaving the page silent.
+  setWorking(true, modelLoaded
+    ? "Searching…"
+    : "Loading the search model. This happens once.");
+  try {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(await response.text());
+    const data = await response.json();
+    hits = data.results;
+    stage.classList.add("docked");
+    if (!hits.length) note("No photos matched. Check the folders you have ticked.");
+    else render();
+  } catch (err) {
+    results.innerHTML = "";
+    note(`Search failed. ${escapeHtml(String(err.message || err))}`);
+  } finally {
+    setWorking(false);
+    modelLoaded = true;
+  }
+}
+
+// --- justified grid -------------------------------------------------------
+
+// Rows of equal height and variable width, so every photo keeps its own
+// proportions. Cropping every frame square would throw away the framing,
+// which is often the thing being searched for.
+function render() {
+  results.innerHTML = "";
+  if (!hits.length) return;
+
+  // clientWidth includes horizontal padding, which is not usable width.
+  const box = getComputedStyle(results);
+  const width = results.clientWidth - parseFloat(box.paddingLeft) - parseFloat(box.paddingRight);
+  const gap = parseFloat(getComputedStyle(document.documentElement)
+    .getPropertyValue("--tile-gap")) || 8;
+  const target = width < 700 ? 150 : width < 1200 ? 200 : 240;
+  let row = [], aspectSum = 0, lastHeight = 0;
+
+  const flush = (last) => {
+    if (!row.length) return;
+    let height = (width - gap * (row.length - 1)) / aspectSum;
+    // A short final row would otherwise stretch and tower over the rows above.
+    if (last) height = Math.min(height, lastHeight || target);
+    else lastHeight = height;
+    const div = document.createElement("div");
+    div.className = "row";
+    row.forEach((hit) => div.appendChild(tile(hit, height)));
+    results.appendChild(div);
+    row = []; aspectSum = 0;
+  };
+
+  hits.forEach((hit) => {
+    const aspect = (hit.width && hit.height) ? hit.width / hit.height : 4 / 3;
+    row.push(hit); aspectSum += aspect;
+    if (aspectSum * target >= width) flush(false);
+  });
+  flush(true);
+}
+
+function tile(hit, height) {
+  const aspect = (hit.width && hit.height) ? hit.width / hit.height : 4 / 3;
+  const figure = document.createElement("figure");
+  figure.className = "tile";
+  figure.style.width = `${Math.max(40, aspect * height)}px`;
+  figure.style.height = `${height}px`;
+  figure.tabIndex = 0;
+  figure.setAttribute("role", "button");
+  figure.setAttribute("aria-label", `Open ${basename(hit.path)}`);
+  // Results span folders, so a caption names the folder as well as the file.
+  figure.innerHTML =
+    `<img src="/thumb/${hit.folder}/${hit.id}" alt="" loading="lazy">` +
+    `<div class="meter" style="width:${Math.round(hit.match * 100)}%"></div>` +
+    `<figcaption><span class="nm">${escapeHtml(basename(hit.path))}` +
+    `<span class="fd">${escapeHtml(hit.folder_name)}</span></span>` +
+    `<b>${hit.score.toFixed(3)}</b></figcaption>`;
+
+  const open = () => openLightbox(hits.indexOf(hit));
+  figure.addEventListener("click", open);
+  figure.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+  });
+  return figure;
+}
+
+let resizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => { if (hits.length) render(); }, 120);
+});
+
+// --- lightbox -------------------------------------------------------------
+
+const lightbox = el("lightbox");
+
+function openLightbox(i) {
+  if (i < 0 || i >= hits.length) return;
+  current = i;
+  const hit = hits[i];
+  el("lb-img").src = `/image/${hit.folder}/${hit.id}`;
+  el("lb-path").textContent = hit.path;
+  const bits = [`match ${Math.round(hit.match * 100)}%`, `cosine ${hit.score.toFixed(3)}`];
+  if (hit.width) bits.push(`${hit.width}\u00d7${hit.height}`);
+  if (hit.taken_at) bits.push(hit.taken_at);
+  el("lb-meta").innerHTML = bits.map((b) => `<b>${escapeHtml(b)}</b>`).join("  \u00b7  ");
+  lightbox.hidden = false;
+  el("lb-close").focus();
+}
+
+function closeLightbox() { lightbox.hidden = true; current = -1; input.focus(); }
+
+el("lb-close").addEventListener("click", closeLightbox);
+lightbox.querySelector(".frame").addEventListener("click", closeLightbox);
+el("lb-similar").addEventListener("click", () => {
+  const hit = hits[current];
+  if (!hit) return;
+  closeLightbox();
+  input.value = "";
+  input.placeholder = `Photos like ${basename(hit.path)}`;
+  run(`/api/similar?folder=${hit.folder}&id=${hit.id}&k=80`);
+});
+
+document.addEventListener("keydown", (e) => {
+  if (!lightbox.hidden) {
+    if (e.key === "Escape") closeLightbox();
+    if (e.key === "ArrowRight") openLightbox(current + 1);
+    if (e.key === "ArrowLeft") openLightbox(current - 1);
+    return;
+  }
+  if (e.key === "Escape" && openDrawerName) { closeDrawers(); return; }
+  if (e.key === "/" && document.activeElement !== input) { e.preventDefault(); input.focus(); }
+});
+
+// --- drawers --------------------------------------------------------------
+
+const scrim = el("scrim");
+const DRAWERS = { folders: "folders-panel", settings: "settings-panel", cli: "cli-panel" };
+let openDrawerName = null;
+
+function openDrawer(name) {
+  closeDrawers(true);
+  const panel = el(DRAWERS[name]);
+  panel.hidden = false;
+  scrim.hidden = false;
+  // A frame between unhiding and animating, so the slide actually plays.
+  requestAnimationFrame(() => { panel.classList.add("on"); scrim.classList.add("on"); });
+  openDrawerName = name;
+  syncNav();
+  if (name === "folders") loadFolders();
+  if (name === "settings") loadSettings();
+}
+
+function closeDrawers(immediate) {
+  Object.values(DRAWERS).forEach((id) => {
+    const panel = el(id);
+    panel.classList.remove("on");
+    if (immediate) panel.hidden = true;
+    else if (!panel.hidden) setTimeout(() => { panel.hidden = true; }, 300);
+  });
+  scrim.classList.remove("on");
+  if (immediate) scrim.hidden = true;
+  else setTimeout(() => { if (!openDrawerName) scrim.hidden = true; }, 300);
+  openDrawerName = null;
+  syncNav();
+}
+
+function syncNav() {
+  for (const [name, id] of [["folders", "toggle-folders"],
+                            ["settings", "toggle-settings"],
+                            ["cli", "toggle-cli"]]) {
+    el(id).setAttribute("aria-expanded", String(openDrawerName === name));
+  }
+}
+
+el("toggle-folders").addEventListener("click", () =>
+  openDrawerName === "folders" ? closeDrawers() : openDrawer("folders"));
+el("toggle-settings").addEventListener("click", () =>
+  openDrawerName === "settings" ? closeDrawers() : openDrawer("settings"));
+el("toggle-cli").addEventListener("click", () =>
+  openDrawerName === "cli" ? closeDrawers() : openDrawer("cli"));
+scrim.addEventListener("click", () => closeDrawers());
+document.querySelectorAll("[data-close]").forEach((b) =>
+  b.addEventListener("click", () => closeDrawers()));
+
+function showFolders(show) { show ? openDrawer("folders") : closeDrawers(); }
+
+// --- folders --------------------------------------------------------------
+
+async function loadFolders() {
+  const data = await (await fetch("/api/folders")).json();
+  folders = data.folders;
+  renderFolders();
+  renderScope();
+}
+
+function renderFolders() {
+  const list = el("folder-list");
+  list.innerHTML = "";
+  if (!folders.length) {
+    const li = document.createElement("li");
+    li.innerHTML = `<span class="name" style="grid-column:1/-1">No folders yet</span>` +
+      `<span class="path">Add the folder your photos live in to get started.</span>`;
+    list.appendChild(li);
+    return;
+  }
+  folders.forEach((folder) => list.appendChild(folderRow(folder)));
+}
+
+function folderRow(folder) {
+  const li = document.createElement("li");
+  if (!folder.selected || folder.state !== "ready") li.className = "off";
+
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.className = "box";
+  box.checked = folder.selected && folder.state === "ready";
+  box.disabled = folder.state !== "ready";
+  box.setAttribute("aria-label", `Search ${folder.name}`);
+  box.addEventListener("change", () => toggle(folder.key, box.checked));
+  li.appendChild(box);
+
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = folder.name;
+  li.appendChild(name);
+
+  const count = document.createElement("span");
+  count.className = "count";
+  count.textContent = folder.photos.toLocaleString();
+  li.appendChild(count);
+
+  const path = document.createElement("span");
+  path.className = "path";
+  path.textContent = folder.path;
+  path.title = folder.path;
+  li.appendChild(path);
+
+  const foot = document.createElement("div");
+  foot.className = "foot";
+
+  const state = document.createElement("span");
+  state.className = "state";
+  if (folder.state === "needs_reindex") {
+    state.classList.add("warn");
+    state.textContent = "Needs reindex";
+    state.title = `Indexed with ${folder.model}, which cannot be compared with the ` +
+      `model in use now. Reindex to include it.`;
+  } else if (folder.state === "missing") {
+    state.textContent = "Folder missing";
+  }
+  foot.appendChild(state);
+
+  if (folder.state !== "missing") {
+    const again = document.createElement("button");
+    again.textContent = folder.state === "needs_reindex" ? "Reindex" : "Update";
+    again.addEventListener("click", () => reindex(folder));
+    foot.appendChild(again);
+  }
+  const drop = document.createElement("button");
+  drop.textContent = "Remove";
+  drop.title = "Delete this folder's index. Your photos are not touched.";
+  drop.addEventListener("click", () => forget(folder));
+  foot.appendChild(drop);
+
+  li.appendChild(foot);
+  return li;
+}
+
+async function toggle(key, on) {
+  const ready = folders.filter((f) => f.state === "ready");
+  let keys = ready.filter((f) => f.selected).map((f) => f.key);
+  keys = on ? [...new Set([...keys, key])] : keys.filter((k) => k !== key);
+  // An empty list means "all" server-side, so never send one by accident.
+  if (!keys.length) keys = ["__none__"];
+  const data = await (await fetch("/api/folders/select", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ keys }),
+  })).json();
+  folders = data.folders;
+  renderFolders();
+  renderScope();
+  if (input.value.trim()) search(input.value.trim());
+}
+
+function renderScope() {
+  const ready = folders.filter((f) => f.state === "ready");
+  const on = ready.filter((f) => f.selected);
+  const photos = on.reduce((sum, f) => sum + f.photos, 0);
+  const stale = folders.filter((f) => f.state === "needs_reindex").length;
+
+  el("count").innerHTML = folders.length
+    ? `<b>${folders.reduce((s, f) => s + f.photos, 0).toLocaleString()}</b> indexed` : "";
+
+  const scope = el("scope");
+  scope.innerHTML = "";
+  const line = document.createElement("span");
+  if (!folders.length) {
+    line.textContent = "No folders yet.";
+    scope.appendChild(line);
+    addScopeButton("Add a folder");
+    return;
+  }
+  const where = on.length === ready.length && ready.length > 1
+    ? `all <b>${ready.length}</b> folders`
+    : `<b>${on.length}</b> of <b>${ready.length}</b> folders`;
+  line.innerHTML = `Searching ${where} &middot; <b>${photos.toLocaleString()}</b> photos` +
+    (stale ? ` &middot; ${stale} need reindexing` : "");
+  scope.appendChild(line);
+  addScopeButton("Change");
+}
+
+function addScopeButton(label) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  button.addEventListener("click", () => openDrawer("folders"));
+  el("scope").appendChild(button);
+}
+
+// --- adding and indexing --------------------------------------------------
+
+el("browse").addEventListener("click", async () => {
+  const button = el("browse");
+  button.disabled = true;
+  button.textContent = "Choose\u2026";
+  try {
+    const data = await (await fetch("/api/browse")).json();
+    if (data.path) { el("folder-input").value = data.path; estimateFolder(data.path); }
+  } catch { /* fall back to typing a path */ }
+  button.disabled = false;
+  button.textContent = "Browse";
+});
+
+el("add-folder").addEventListener("click", addFolder);
+el("folder-input").addEventListener("keydown", (e) => { if (e.key === "Enter") addFolder(); });
+
+let estimateTimer = null;
+el("folder-input").addEventListener("input", () => {
+  clearTimeout(estimateTimer);
+  const value = el("folder-input").value.trim();
+  if (!value) { el("estimate").textContent = ""; return; }
+  estimateTimer = setTimeout(() => estimateFolder(value), 400);
+});
+
+// Counting files is cheap; embedding them is not. Show the bill first.
+async function estimateFolder(folder) {
+  const line = el("estimate");
+  line.textContent = "Counting\u2026";
+  try {
+    const d = await (await fetch(`/api/estimate?folder=${encodeURIComponent(folder)}`)).json();
+    if (!d.ok) { line.textContent = d.message || "That folder could not be read."; return; }
+    if (!d.photos) { line.textContent = "No photos in that folder, or any subfolder."; return; }
+    const already = d.already_indexed
+      ? ` \u00b7 ${d.already_indexed.toLocaleString()} already indexed` : "";
+    line.textContent =
+      `${d.photos.toLocaleString()} photos \u00b7 ${(d.bytes / 1073741824).toFixed(1)} GB`
+      + ` \u00b7 about ${secs(d.eta)} at ${d.rate} img/s${already}`;
+  } catch {
+    line.textContent = "";
+  }
+}
+
+async function addFolder() {
+  const field = el("folder-input");
+  const folder = field.value.trim();
+  if (!folder) return;
+  const response = await fetch("/api/folders/add", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ folder }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) { el("job-status").textContent = body.message || "That folder could not be added."; return; }
+  field.value = "";
+  el("estimate").textContent = "";
+  pollJob();
+}
+
+async function reindex(folder) {
+  const rebuild = folder.state === "needs_reindex" ? "?rebuild=true" : "";
+  const response = await fetch(`/api/folders/${folder.key}/reindex${rebuild}`, { method: "POST" });
+  const body = await response.json().catch(() => ({}));
+  el("job-status").textContent = response.ok
+    ? (body.message || "Indexing started.")
+    : (body.message || body.detail || "Could not start indexing.");
+  pollJob();
+}
+
+async function forget(folder) {
+  const data = await (await fetch(`/api/folders/${folder.key}`, { method: "DELETE" })).json();
+  folders = data.folders;
+  renderFolders();
+  renderScope();
+  el("job-status").textContent = `Removed the index for ${folder.name}. Your photos are untouched.`;
+  if (input.value.trim()) search(input.value.trim());
+}
+
+async function pollJob() {
+  clearTimeout(jobTimer);
+  const data = await (await fetch("/api/status")).json();
+  const job = data.job;
+  const status = el("job-status");
+
+  if (job.error) { status.textContent = job.error; folders = data.folders; renderFolders(); renderScope(); return; }
+  if (job.running) {
+    status.innerHTML = describeJob(job);
+    const stop = document.getElementById("stop-job");
+    if (stop) stop.addEventListener("click", stopJob);
+    jobTimer = setTimeout(pollJob, 600);
+    return;
+  }
+  if (job.message) status.textContent = job.message;
+  modelLoaded = data.model_loaded;
+  folders = data.folders;
+  renderFolders();
+  renderScope();
+  if (input.value.trim()) search(input.value.trim());
+}
+
+
+// --- settings, and what the machine is doing ------------------------------
+
+let settings = null;
+
+function secs(n) {
+  n = Math.round(n);
+  if (n < 60) return `${n}s`;
+  if (n < 3600) return `${Math.round(n / 60)} min`;
+  const h = Math.floor(n / 3600);
+  return `${h}h ${Math.round((n % 3600) / 60)}m`;
+}
+
+function totalPhotos() { return folders.reduce((s, f) => s + f.photos, 0); }
+
+async function loadSettings() {
+  settings = await (await fetch("/api/settings")).json();
+  renderTiers();
+  renderFacts();
+}
+
+function renderTiers() {
+  const list = el("tier-list");
+  list.innerHTML = "";
+  const chosen = settings.configured.tier;
+  const photos = totalPhotos();
+
+  settings.tiers.forEach((tier) => {
+    const button = document.createElement("button");
+    button.className = "tier" + (tier.key === chosen ? " on" : "");
+    button.type = "button";
+    const cost = photos && tier.rate ? ` \u00b7 ${secs(photos / tier.rate)} to reindex` : "";
+    button.innerHTML =
+      `<span class="dot"></span>` +
+      `<span class="name">${escapeHtml(tier.label)}</span>` +
+      `<span class="speed">${tier.rate} img/s${tier.measured ? "" : " est."}</span>` +
+      `<span class="why">${escapeHtml(tier.note + cost)}</span>` +
+      `<span class="id">${escapeHtml(tier.model)}</span>`;
+    button.addEventListener("click", () => chooseTier(tier));
+    list.appendChild(button);
+  });
+}
+
+async function chooseTier(tier) {
+  if (tier.key === settings.configured.tier) return;
+  const photos = totalPhotos();
+  const note = el("tier-note");
+  note.textContent = `Switching to ${tier.label}\u2026`;
+
+  const response = await fetch("/api/settings", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tier: tier.key }),
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    note.textContent = body.detail || "Could not change the model.";
+    return;
+  }
+  settings = await response.json();
+  modelLoaded = false;
+  renderTiers();
+  renderFacts();
+  await loadFolders();
+  // Vectors from the old model cannot be compared with the new one, so every
+  // folder now reads as needing a reindex. Say so plainly rather than letting
+  // the folder list quietly turn amber.
+  note.textContent = photos
+    ? `Now using ${tier.label}. Your ${photos.toLocaleString()} photos need reindexing`
+      + ` (about ${secs(photos / tier.rate)}) \u2014 use Reindex in Folders.`
+    : `Now using ${tier.label}.`;
+}
+
+function pair(label, value) {
+  return `<div class="pair"><span>${escapeHtml(label)}</span>`
+       + `<span>${escapeHtml(String(value))}</span></div>`;
+}
+
+function renderFacts() {
+  if (!settings) return;
+  const run = settings.running, conf = settings.configured, m = settings.machine;
+  let html = `<h3>Running now</h3>`;
+  html += pair("Device", run.device === "cuda"
+    ? `GPU \u2014 ${m.gpu ? m.gpu.name : "CUDA"}`
+    : `CPU \u2014 ${m.cpu_count} cores`);
+  html += pair("Precision", run.precision);
+  if (settings.model_loaded) {
+    html += pair("Model", run.model);
+    html += pair("Input size", `${run.image_size}px`);
+    html += pair("Vector width", run.dim);
+  } else {
+    html += pair("Model", "loads on first search");
+  }
+
+  html += `<h3>Configured</h3>`;
+  html += pair("Quality", conf.tier);
+  html += pair("Device", conf.device);
+  html += pair("Precision", conf.precision);
+  html += pair("Model override", conf.model || "none (uses the tier)");
+  html += pair("Batch size", conf.batch_size || "auto");
+  el("running-facts").innerHTML = html;
+}
+
+function gauge(label, percent, value, sub) {
+  const pct = Math.max(0, Math.min(100, percent || 0));
+  return `<div class="gauge${pct < 5 ? " idle" : ""}">`
+    + `<div class="top"><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></div>`
+    + `<div class="bar"><i style="width:${pct}%"></i></div>`
+    + (sub ? `<div class="sub">${escapeHtml(sub)}</div>` : "") + `</div>`;
+}
+
+function renderMeters(m, job) {
+  const box = el("meters");
+  if (!box) return;
+  let html = "";
+  if (m.gpu) {
+    const g = m.gpu;
+    const bits = [`${g.mem_used.toFixed(1)} / ${g.mem_total.toFixed(1)} GB`];
+    if (g.temperature != null) bits.push(`${g.temperature}\u00b0C`);
+    if (g.power != null) bits.push(`${g.power} W`);
+    html += gauge("GPU", g.util, g.util == null ? "\u2014" : `${g.util}%`,
+                  `${g.name} \u00b7 ${bits.join(" \u00b7 ")}`);
+    html += gauge("GPU memory", (g.mem_used / g.mem_total) * 100,
+                  `${g.mem_used.toFixed(1)} GB`, null);
+  }
+  html += gauge("CPU", m.cpu_percent, `${m.cpu_percent}%`, `${m.cpu_count} cores`);
+  html += gauge("Memory", (m.ram_used / m.ram_total) * 100,
+                `${m.ram_used.toFixed(1)} / ${m.ram_total.toFixed(1)} GB`, null);
+  if (job && job.running && job.total) {
+    html += gauge("Indexing", (job.done / job.total) * 100,
+                  `${job.done} / ${job.total}`,
+                  `${job.rate} img/s \u00b7 ${secs(job.eta)} left`);
+  }
+  box.innerHTML = html;
+}
+
+// The header pulse answers "is it doing anything?" without opening a drawer.
+function renderPulse(m, job) {
+  const node = el("pulse");
+  const load = m.gpu && m.gpu.util != null ? m.gpu.util : m.cpu_percent;
+  const busy = (job && job.running) || load >= 25;
+  node.classList.toggle("busy", !!busy);
+  const where = m.gpu ? "GPU" : "CPU";
+  node.lastElementChild.textContent = job && job.running
+    ? `indexing ${job.done}/${job.total}` + (job.rate ? ` \u00b7 ${job.rate}/s` : "")
+    : `${where} ${Math.round(load)}%`;
+}
+
+let machineTimer = null;
+async function pollMachine() {
+  clearTimeout(machineTimer);
+  try {
+    const data = await (await fetch("/api/machine")).json();
+    renderPulse(data.machine, data.job);
+    if (!el("settings-panel").hidden) renderMeters(data.machine, data.job);
+    if (settings) {
+      settings.machine = data.machine;
+      if (data.model_loaded && !settings.model_loaded) loadSettings();
+    }
+  } catch { /* the app may be shutting down */ }
+  // Once a second while you are watching the meters, lazily otherwise.
+  machineTimer = setTimeout(pollMachine, openDrawerName === "settings" ? 1000 : 3000);
+}
+
+
+// A job that says only "starting" for ten minutes is indistinguishable from a
+// hang. Name the phase, and while the model downloads, show the bytes landing.
+function describeJob(job) {
+  const known = job.total > 0;
+  const pct = known ? Math.round((job.done / job.total) * 100) : 0;
+  let line, sub = "";
+
+  if (job.phase === "loading model") {
+    const mb = job.downloaded ? ` \u00b7 ${(job.downloaded / 1048576).toFixed(0)} MB downloaded` : "";
+    line = "Loading the model";
+    sub = `First use of this model downloads it, which can take a few minutes${mb}.`;
+  } else if (job.phase === "stopping") {
+    line = "Stopping after the current batch\u2026";
+  } else if (job.phase === "scanning") {
+    line = "Looking for photos\u2026";
+  } else if (known) {
+    line = `Indexing ${job.done.toLocaleString()} of ${job.total.toLocaleString()}`;
+    sub = `${job.rate} img/s \u00b7 ${secs(job.eta)} left`;
+  } else {
+    line = escapeHtml(job.phase);
+  }
+
+  const bar = known
+    ? `<span class="track"><i style="width:${pct}%"></i></span>`
+    : `<span class="track pending"><i></i></span>`;
+  return `${escapeHtml(line)}${bar}` +
+    `<div class="row2">${sub ? `<span>${escapeHtml(sub)}</span>` : ""}` +
+    `<button type="button" id="stop-job">Stop</button></div>`;
+}
+
+async function stopJob() {
+  const body = await (await fetch("/api/folders/stop", { method: "POST" })).json();
+  el("job-status").textContent = body.message || "Stopping\u2026";
+  pollJob();
+}
+
+
+el("quit-app").addEventListener("click", async () => {
+  el("app-note").textContent = "Shutting down\u2026 you can close this tab.";
+  try { await fetch("/api/quit", { method: "POST" }); } catch { /* it went away */ }
+  clearTimeout(machineTimer);
+  clearTimeout(jobTimer);
+});
+
+// --- helpers --------------------------------------------------------------
+
+function note(html) { results.innerHTML = `<div class="note">${html}</div>`; }
+function basename(path) { return String(path).split(/[\\/]/).pop(); }
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+el("examples").innerHTML = EXAMPLES.map((e) => `<button type="button">${escapeHtml(e)}</button>`).join("");
+el("examples").addEventListener("click", (e) => {
+  if (e.target.tagName !== "BUTTON") return;
+  input.value = e.target.textContent;
+  input.focus();
+  search(input.value);
+});
+
+// --- start ----------------------------------------------------------------
+
+(async function start() {
+  await loadFolders();
+
+  // `ctximg web` opens the app with one folder chosen, so honour ?folder=.
+  const wanted = new URLSearchParams(location.search).get("folder");
+  if (wanted && folders.some((f) => f.key === wanted && f.state === "ready")) {
+    await fetch("/api/folders/select", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ keys: [wanted] }),
+    });
+    await loadFolders();
+  } else if (!folders.length || folders.some((f) => f.state !== "ready")) {
+    // Open only when something needs deciding: no folders at all, or one that
+    // cannot be searched. Otherwise the scope line already says what is
+    // indexed, and a drawer over the search field on every launch is a door
+    // you have to close before you can type.
+    openDrawer("folders");
+    if (!folders.length) note("Add a folder of photos to get started.");
+  }
+  pollJob();
+  pollMachine();
+  input.focus();
+})();
+</script>
+</body>
+</html>

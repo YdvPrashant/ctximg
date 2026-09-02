@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ctximg"
+version = "0.1.0"
+description = "Purely contextual (semantic) image search over a local photo gallery"
+authors = [{ name = "prash" }]
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.2",
+    "open_clip_torch>=2.24",
+    # SigLIP checkpoints tokenise through HuggingFace, unlike the
+    # LAION CLIP models which use open_clip's own BPE tokenizer.
+    "transformers>=4.40",
+    "numpy>=1.26",
+    "pillow>=10.0",
+    "pillow-heif>=0.15",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "tqdm>=4.66",
+    "psutil>=5.9",
+    "nvidia-ml-py>=12.0; platform_system!='Darwin'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "httpx>=0.27"]
+
+[project.scripts]
+ctximg = "ctximg.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"ctximg.web" = ["static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["model: requires downloading the CLIP model (deselect with -m 'not model')"]
